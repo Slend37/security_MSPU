@@ -9,3 +9,11 @@ repos:
       - id: check-added-large-files # Предотвращает коммит больших файлов (например, .env или БД)
       - id: detect-private-key
       - id: no-commit-to-branch
+
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: pip-audit
+        entry: pip-audit
+        language: system
+        files: requirements.txt

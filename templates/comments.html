@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Комментарии</title>
+</head>
+<body>
+    <h2>Оставить комментарий</h2>
+
+    <form method="POST" action="/comments">
+        <textarea name="comment" rows="4" cols="50" placeholder="Напишите что-нибудь..."></textarea>
+        <br><br>
+        <button type="submit">Отправить</button>
+    </form>
+
+    <hr>
+
+    <h3>Прошлые комментарии</h3>
+
+    {% if comments %}
+        {% for comment in comments %}
+            <div>
+                <div>{{ comment | safe}}</div>
+                <hr>
+            </div>
+        {% endfor %}
+    {% else %}
+        <p>Нет комментариев</p>
+    {% endif %}
+</body>
+</html>

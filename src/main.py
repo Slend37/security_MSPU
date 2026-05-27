@@ -2,7 +2,9 @@ import shutil
 from typing import Annotated
 import uuid
 
-from fastapi import Depends, FastAPI, Request, Form, Response, UploadFile
+from cryptography.fernet import InvalidToken
+from pathlib import Path as FilePath
+from fastapi import Depends, FastAPI, Query, Request, Form, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 import filetype
@@ -16,8 +18,16 @@ from typing import Any
 import bleach
 from dotenv import load_dotenv
 import os
+from cryptography.fernet import Fernet, InvalidToken
+
 
 load_dotenv()
+
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise RuntimeError("ENCRYPTION_KEY не задан в .env файле!")
+
+cipher = Fernet(ENCRYPTION_KEY.encode())
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -40,7 +50,8 @@ files_db = [
         'owner': 'Bob',
         'size' : 1024,
         'path' : 'storage/bob_file.txt',
-        'original_name': 'bob_file.txt'
+        'original_name': 'bob_file.txt',
+        'is_encrypted': False
     },
     {
         'id' : 2,
@@ -48,7 +59,8 @@ files_db = [
         'owner': 'Alice',
         'size' : 2048,
         'path' : 'storage/alice_file.txt',
-        'original_name': 'alice_file.txt'
+        'original_name': 'alice_file.txt',
+        'is_encrypted': False
     },
     {
         'id' : 3,
@@ -56,7 +68,8 @@ files_db = [
         'owner': 'Admin',
         'size' : 4096,
         'path' : 'storage/secret_file.txt',
-        'original_name': 'secret_file.txt'
+        'original_name': 'secret_file.txt',
+        'is_encrypted': False
     },
 ]
 
@@ -260,55 +273,64 @@ file_database = []
 def upload_file(
     request: Request,
     file: UploadFile,
-    user: Annotated[dict | None, Depends(current_user)]
+    user: Annotated[dict | None, Depends(current_user)],
+    encrypt: bool = Query(False, description="Зашифровать файл перед сохранением")
 ) -> Any:
-    file_back = file
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized"
+        )
+
     limit = 1024 * 1024 * 2
-    if file.size > limit:
+    if file.size and file.size > limit:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail="File size exceeds the 2MB limit"
         )
 
-    cur_size = file.size
-    # chunk_size = 1024
+    if not file.filename.lower().endswith((".png", ".jpeg", ".jpg", ".txt")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .jpeg, .png, .jpg, .txt files are allowed"
+        )
+
+    file_data = file.file.read()
+
+    if file.filename.lower().endswith((".png", ".jpeg", ".jpg")):
+        kind = filetype.guess(file_data[:261])
+        if kind is None or kind.mime not in ["image/jpeg", "image/png"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is not a valid jpeg/png file",
+            )
+
+    if encrypt:
+        encrypted_data = cipher.encrypt(file_data)
+        data_to_save = encrypted_data
+    else:
+        data_to_save = file_data
+
     name = uuid.uuid4()
-    # with open(f"storage/{name}", "wb") as f:
-    #     while True:
-    #         chunk = file.file.read(chunk_size)
-    #         if not chunk:
-    #             break
-    #         cur_size += len(chunk)
-    #         if cur_size > limit:
-    #             os.remove(f"storage/{name}")
-    #             raise HTTPException(
-    #                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-    #                 detail="File size exceeds the 2MB limit",
-    #             )
-    #         f.write(chunk)
+    storage_path = f"storage/{name}"
 
-    if not file.filename.lower().endswith(".png") and not file.filename.lower().endswith(".jpeg"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .jpeg and .png files are allowed"
-        )
-    head = file.file.read()
-    kind = filetype.guess(head)
-    print(head)
-    print(kind)
-    if kind is None or kind.mime not in ["image/jpeg", "image/png"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file is not a valid jpeg/png image",
-        )
+    FilePath("storage").mkdir(exist_ok=True)
 
-    with open(f"storage/{name}", "wb") as f:
-        f.write(head)
-    files_db.append(
-        {"id": len(files_db) + 1, "filename": name, "owner": user["username"], "size": cur_size, "path": f"storage/{name}", 'original_name': f"{file.filename}"}
-    )
-    print(files_db)
-    return {"message": "File uploaded successfully"}
+    with open(storage_path, "wb") as f:
+        f.write(data_to_save)
+
+    new_id = max([f['id'] for f in files_db], default=0) + 1
+    files_db.append({
+        "id": new_id,
+        "filename": str(name),
+        "owner": user["username"],
+        "size": len(file_data),
+        "path": storage_path,
+        "original_name": file.filename,
+        "is_encrypted": encrypt
+    })
+
+    return {"message": f"File uploaded successfully{' (encrypted)' if encrypt else ''}"}
 
 @app.get("/files/download/{file_id}")
 def download_file(
@@ -316,38 +338,54 @@ def download_file(
     file_id: int,
     user: Annotated[dict | None, Depends(current_user)]
 ) -> Any:
-
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Unauthorized"
         )
 
-    file = next((f for f in files_db if f['id'] == file_id), None)
-    if file is None:
+    file_meta = next((f for f in files_db if f['id'] == file_id), None)
+    if file_meta is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found"
         )
 
-    if user["role"] == 'admin' or file["owner"] == user["username"]:
-        file_path = str(file["path"])
-        if not file_path or not os.path.exists(file_path):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found on disk"
-            )
-
-        return FileResponse(
-            path=file["path"],
-            filename=file["original_name"],
-            media_type="application/octet-stream",
-            headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{file['original_name']}"
-            }
-        )
-    else:
+    if user["role"] != 'admin' and file_meta["owner"] != user["username"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden"
         )
+
+    file_path = file_meta["path"]
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found on disk"
+        )
+
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+    if file_meta.get("is_encrypted", False):
+        try:
+            decrypted_data = cipher.decrypt(file_data)
+        except InvalidToken:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to decrypt file. Encryption key may have changed."
+            )
+    else:
+        decrypted_data = file_data
+
+    import mimetypes
+    media_type, _ = mimetypes.guess_type(file_meta["original_name"])
+    if media_type is None:
+        media_type = "application/octet-stream"
+
+    return Response(
+        content=decrypted_data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{file_meta['original_name']}"
+        }
+    )

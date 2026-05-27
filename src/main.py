@@ -1,8 +1,11 @@
+import shutil
 from typing import Annotated
+import uuid
 
-from fastapi import Depends, FastAPI, Request, Form, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi import Depends, FastAPI, Request, Form, Response, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.templating import Jinja2Templates
+import filetype
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic_settings import BaseSettings
@@ -33,22 +36,28 @@ users = [
 files_db = [
     {
         'id' : 1,
-        'local_name' : "file1.txt",
-        'src_name' : 'file1.txt',
+        'filename': 'bob_file.txt',
         'owner': 'Bob',
+        'size' : 1024,
+        'path' : 'storage/bob_file.txt',
+        'original_name': 'bob_file.txt'
     },
     {
         'id' : 2,
-        'local_name': 'file2.txt',
-        'src_name' : 'file2.txt',
+        'filename': 'alice_file.txt',
         'owner': 'Alice',
+        'size' : 2048,
+        'path' : 'storage/alice_file.txt',
+        'original_name': 'alice_file.txt'
     },
     {
         'id' : 3,
-        'local_name': 'file3.txt',
-        'src_name' : 'file3.txt',
+        'filename': 'secret_file.txt',
         'owner': 'Admin',
-    }
+        'size' : 4096,
+        'path' : 'storage/secret_file.txt',
+        'original_name': 'secret_file.txt'
+    },
 ]
 
 # class CsrfSettings(BaseSettings):
@@ -153,7 +162,7 @@ def current_user(request: Request) -> dict | None:
         None
     )
 
-@app.get("/files/{file_id}")
+@app.get("/file/{file_id}")
 def get_file_safe(
     request: Request,
     file_id: int,
@@ -178,7 +187,7 @@ def get_file_safe(
             detail="Forbidden"
         )
 
-@app.delete("/files/{file_id}")
+@app.delete("/file/{file_id}")
 def delete_file_safe(
     request: Request,
     file_id: int,
@@ -239,6 +248,104 @@ def get_all_files(
 
     if user['role'] == 'admin':
         return {"my_files" : files_db}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden"
+        )
+
+file_database = []
+
+@app.post("/files/upload")
+def upload_file(
+    request: Request,
+    file: UploadFile,
+    user: Annotated[dict | None, Depends(current_user)]
+) -> Any:
+    file_back = file
+    limit = 1024 * 1024 * 2
+    if file.size > limit:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="File size exceeds the 2MB limit"
+        )
+
+    cur_size = file.size
+    # chunk_size = 1024
+    name = uuid.uuid4()
+    # with open(f"storage/{name}", "wb") as f:
+    #     while True:
+    #         chunk = file.file.read(chunk_size)
+    #         if not chunk:
+    #             break
+    #         cur_size += len(chunk)
+    #         if cur_size > limit:
+    #             os.remove(f"storage/{name}")
+    #             raise HTTPException(
+    #                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+    #                 detail="File size exceeds the 2MB limit",
+    #             )
+    #         f.write(chunk)
+
+    if not file.filename.lower().endswith(".png") and not file.filename.lower().endswith(".jpeg"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .jpeg and .png files are allowed"
+        )
+    head = file.file.read()
+    kind = filetype.guess(head)
+    print(head)
+    print(kind)
+    if kind is None or kind.mime not in ["image/jpeg", "image/png"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is not a valid jpeg/png image",
+        )
+
+    with open(f"storage/{name}", "wb") as f:
+        f.write(head)
+    files_db.append(
+        {"id": len(files_db) + 1, "filename": name, "owner": user["username"], "size": cur_size, "path": f"storage/{name}", 'original_name': f"{file.filename}"}
+    )
+    print(files_db)
+    return {"message": "File uploaded successfully"}
+
+@app.get("/files/download/{file_id}")
+def download_file(
+    request: Request,
+    file_id: int,
+    user: Annotated[dict | None, Depends(current_user)]
+) -> Any:
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized"
+        )
+
+    file = next((f for f in files_db if f['id'] == file_id), None)
+    if file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    if user["role"] == 'admin' or file["owner"] == user["username"]:
+        file_path = str(file["path"])
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found on disk"
+            )
+
+        return FileResponse(
+            path=file["path"],
+            filename=file["original_name"],
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{file['original_name']}"
+            }
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

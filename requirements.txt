@@ -8,3 +8,4 @@ bleach==6.3.0
 fastapi-csrf-protect==1.0.7
 requests==2.34.2
 pytest==9.0.3
+filetype==1.0.7

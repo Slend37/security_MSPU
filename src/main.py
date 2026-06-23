@@ -33,6 +33,7 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 app.add_middleware(
     SessionMiddleware, secret_key=os.getenv("APP_SECRET"),
+    # SessionMiddleware, secret_key='special_test_fake_key',
     https_only=False
 )
 
